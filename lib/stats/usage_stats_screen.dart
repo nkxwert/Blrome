@@ -183,7 +183,7 @@ class _SiteRow extends StatelessWidget {
   }
 }
 
-/// 24시간 × 6칸(10분). 각 칸은 그 10분 동안 가장 오래 본 사이트 색.
+/// 24시간 × 6칸(10분). 각 칸은 그 10분 동안 쓴 시간만큼 왼쪽부터 사이트 색으로 채운다.
 class _TimeGrid extends StatelessWidget {
   const _TimeGrid({required this.slots, required this.colorOf});
 
@@ -191,14 +191,15 @@ class _TimeGrid extends StatelessWidget {
   final Color Function(String site) colorOf;
 
   static const _cols = 60 ~/ BlromeController.slotMinutes;
-  static const _cellHeight = 24.0;
-  static const _labelWidth = 22.0;
+  static const _slotSeconds = BlromeController.slotMinutes * 60;
+  static const _cellHeight = 26.0;
+  static const _labelWidth = 24.0;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final line = theme.dividerColor;
-    return Container(
+    final line = theme.colorScheme.outlineVariant;
+    return DecoratedBox(
       decoration: BoxDecoration(border: Border.all(color: line)),
       child: Column(
         children: [
@@ -206,6 +207,8 @@ class _TimeGrid extends StatelessWidget {
             SizedBox(
               height: _cellHeight,
               child: Row(
+                // 칸들이 줄 높이를 꽉 채우도록 늘린다.
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Container(
                     width: _labelWidth,
@@ -213,7 +216,7 @@ class _TimeGrid extends StatelessWidget {
                     decoration: BoxDecoration(
                       border: Border(
                         right: BorderSide(color: line),
-                        bottom: BorderSide(color: line),
+                        bottom: hour < 23 ? BorderSide(color: line) : BorderSide.none,
                       ),
                     ),
                     child: Text('$hour',
@@ -221,7 +224,17 @@ class _TimeGrid extends StatelessWidget {
                             color: theme.colorScheme.onSurfaceVariant)),
                   ),
                   for (var col = 0; col < _cols; col++)
-                    Expanded(child: _cell(context, hour * _cols + col, line)),
+                    Expanded(
+                      child: _cell(
+                        hour * _cols + col,
+                        Border(
+                          right: col < _cols - 1
+                              ? BorderSide(color: line, width: 0.5)
+                              : BorderSide.none,
+                          bottom: hour < 23 ? BorderSide(color: line) : BorderSide.none,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -230,29 +243,36 @@ class _TimeGrid extends StatelessWidget {
     );
   }
 
-  Widget _cell(BuildContext context, int slot, Color line) {
+  Widget _cell(int slot, Border border) {
     final sites = slots[slot];
-    final border = Border(
-      right: BorderSide(color: line, width: 0.5),
-      bottom: BorderSide(color: line),
-    );
     if (sites == null || sites.isEmpty) {
       return DecoratedBox(decoration: BoxDecoration(border: border));
     }
-    final top = sites.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+    final entries = sites.entries.toList()..sort((a, b) => b.value - a.value);
     final start = slot * BlromeController.slotMinutes;
     final from = '${start ~/ 60}:${(start % 60).toString().padLeft(2, '0')}';
-    final detail = (sites.entries.toList()..sort((a, b) => b.value - a.value))
-        .map((e) => '${e.key} ${formatDuration(e.value)}')
-        .join('\n');
     return Tooltip(
       triggerMode: TooltipTriggerMode.tap,
-      message: '$from~\n$detail',
+      message: '$from~\n${entries.map((e) => '${e.key} ${formatDuration(e.value)}').join('\n')}',
       child: DecoratedBox(
         decoration: BoxDecoration(border: border),
         child: Padding(
-          padding: const EdgeInsets.all(1),
-          child: ColoredBox(color: colorOf(top)),
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              var left = width;
+              final segments = <Widget>[];
+              for (final e in entries) {
+                if (left <= 0) break;
+                // 몇 초만 써도 보이도록 최소 2px, 칸을 넘치지 않게 남은 폭까지.
+                final w = min(left, max(2.0, width * e.value / _slotSeconds));
+                segments.add(Container(width: w, color: colorOf(e.key)));
+                left -= w;
+              }
+              return Row(children: segments);
+            },
+          ),
         ),
       ),
     );
