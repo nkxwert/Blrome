@@ -61,6 +61,26 @@ void main() {
     expect(result?.limitMinutes, 60);
   });
 
+  testWidgets('규칙 다이얼로그: 1분 단위 값을 그대로 유지', (tester) async {
+    SiteRule? result;
+    await pumpPhone(
+      tester,
+      Builder(
+        builder: (context) => TextButton(
+          onPressed: () async => result = await showRuleEditDialog(context,
+              initial: const SiteRule(
+                  domain: 'x.com', mode: RuleMode.dailyLimit, limitMinutes: 37)),
+          child: const Text('open'),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('저장'));
+    await tester.pumpAndSettle();
+    expect(result?.limitMinutes, 37);
+  });
+
   testWidgets('꾹 누르기: 중간에 떼면 실패, 끝까지 누르면 확인', (tester) async {
     bool? result;
     await pumpPhone(

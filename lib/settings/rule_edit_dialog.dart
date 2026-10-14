@@ -30,20 +30,18 @@ class _RuleEditDialog extends StatefulWidget {
 
 class _RuleEditDialogState extends State<_RuleEditDialog> {
   static const presets = [15, 30, 60, 120];
-  static const step = 5;
 
   late final _domain =
       TextEditingController(text: widget.initial?.domain ?? widget.domain);
   late RuleMode _mode = widget.initial?.mode ?? RuleMode.dailyLimit;
 
-  /// 다이얼 값(분). 다이얼이 5분 단위라 그에 맞춘다.
-  late int _minutes = _snap(widget.initial?.limitMinutes ?? 30);
+  /// 다이얼 값(분). 1분 단위로 0시간 1분 ~ 23시간 59분.
+  late int _minutes = (widget.initial?.limitMinutes ?? 30).clamp(1, 23 * 60 + 59);
 
   /// 프리셋을 누르면 다이얼을 새로 만들어 위치를 옮긴다.
   int _pickerKey = 0;
   String? _domainError;
 
-  static int _snap(int m) => ((m / step).round() * step).clamp(step, 23 * 60 + 55);
 
   @override
   void dispose() {
@@ -116,7 +114,6 @@ class _RuleEditDialogState extends State<_RuleEditDialog> {
                   child: CupertinoTimerPicker(
                     key: ValueKey(_pickerKey),
                     mode: CupertinoTimerPickerMode.hm,
-                    minuteInterval: step,
                     initialTimerDuration: Duration(minutes: _minutes),
                     onTimerDurationChanged: (d) =>
                         setState(() => _minutes = d.inMinutes),
