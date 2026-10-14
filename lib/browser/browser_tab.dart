@@ -11,6 +11,9 @@ class BrowserTab {
   double progress = 1;
   bool canGoBack = false;
   bool canGoForward = false;
+
+  /// 데스크톱 사이트로 보기.
+  bool desktopMode = false;
   final WebViewController webView;
 
   /// 차단 화면을 보여 주는 중이면 차단된 원래 URL.

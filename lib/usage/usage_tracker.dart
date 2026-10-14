@@ -1,11 +1,11 @@
 import 'dart:async';
 
 import '../blrome_controller.dart';
-import '../rules/site_rule.dart';
 
 /// 화면에 보이는 탭의 사이트 사용 시간을 1초 단위로 센다.
 ///
-/// 앱이 포그라운드이고 [currentHost]가 하루 제한 규칙에 걸릴 때만 센다.
+/// 앱이 포그라운드일 때 [currentHost]의 사이트 시간을 쌓고,
+/// 하루 제한이 걸린 사이트면 경고·차단 시점을 알린다.
 class UsageTracker {
   UsageTracker({
     required this.controller,
@@ -49,21 +49,23 @@ class UsageTracker {
     final host = currentHost();
     if (host == null || host.isEmpty) return;
 
-    final rule = controller.ruleFor(host);
-    if (rule == null || rule.mode != RuleMode.dailyLimit) return;
-    if (controller.isUnlockedToday(rule.domain)) return;
-    if (controller.decide(host).blocked) return;
+    final before = controller.decide(host);
+    if (before.blocked) return;
 
-    controller.addUsage(rule.domain, 1);
+    final site = controller.siteKeyFor(host);
+    controller.addUsage(site, 1);
 
-    final after = controller.decide(host);
-    if (after.blocked) {
-      _save();
-      onLimitReached?.call(rule.domain);
-      return;
-    }
-    if (warnAtSeconds.contains(after.remainingSeconds)) {
-      onWarning?.call(rule.domain, after.remainingSeconds!);
+    // 하루 제한이 걸린(그리고 오늘 해제하지 않은) 사이트만 남은 시간을 본다.
+    if (before.remainingSeconds != null) {
+      final after = controller.decide(host);
+      if (after.blocked) {
+        _save();
+        onLimitReached?.call(site);
+        return;
+      }
+      if (warnAtSeconds.contains(after.remainingSeconds)) {
+        onWarning?.call(site, after.remainingSeconds!);
+      }
     }
     if (++_unsaved >= saveEverySeconds) _save();
   }

@@ -80,6 +80,33 @@ void main() {
     expect(c.rules.map((r) => r.domain), ['b.com']);
   });
 
+  test('규칙 없는 사이트도 www를 떼고 기록하고, 10분 칸에 쌓는다', () {
+    now = DateTime(2026, 10, 14, 13, 25);
+    c.addUsage(c.siteKeyFor('www.naver.com'), 30);
+    now = DateTime(2026, 10, 14, 13, 31);
+    c.addUsage(c.siteKeyFor('m.naver.com'), 5);
+    expect(c.usageForDay('2026-10-14'), {'naver.com': 30, 'm.naver.com': 5});
+    expect(c.slotsForDay('2026-10-14'), {
+      80: {'naver.com': 30},
+      81: {'m.naver.com': 5},
+    });
+  });
+
+  test('규칙이 있으면 하위 도메인 사용량이 규칙 도메인으로 모인다', () async {
+    await c.upsertRule(const SiteRule(
+        domain: 'youtube.com', mode: RuleMode.dailyLimit, limitMinutes: 30));
+    expect(c.siteKeyFor('m.youtube.com'), 'youtube.com');
+  });
+
+  test('10분 칸 기록도 저장 후 다시 불러와진다', () async {
+    c.addUsage('a.com', 42);
+    await c.flush();
+    final slot = (now.hour * 60 + now.minute) ~/ BlromeController.slotMinutes;
+    expect(newController().slotsForDay(c.todayKey), {
+      slot: {'a.com': 42},
+    });
+  });
+
   group('UsageTracker', () {
     late String? host;
     late List<String> events;
@@ -112,6 +139,7 @@ void main() {
       host = 'naver.com';
       ticks(10);
       expect(c.usedSecondsToday('youtube.com'), 60);
+      expect(c.usedSecondsToday('naver.com'), 10);
 
       host = 'youtube.com';
       tracker.foreground = false;

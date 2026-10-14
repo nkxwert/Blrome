@@ -35,3 +35,14 @@ class SiteRule {
         limitMinutes: json['limitMinutes'] as int?,
       );
 }
+
+/// [old]를 [updated]로 바꾸는 게 규칙을 느슨하게 만드는지.
+///
+/// 도메인을 바꾸거나(기존 도메인이 풀림), 항상 차단 → 하루 제한,
+/// 하루 제한 시간을 늘리는 경우가 해당한다. 더 엄하게 바꾸는 건 false.
+bool loosens(SiteRule old, SiteRule updated) {
+  if (old.domain != updated.domain) return true;
+  if (old.mode == RuleMode.alwaysBlock) return updated.mode != RuleMode.alwaysBlock;
+  if (updated.mode == RuleMode.alwaysBlock) return false;
+  return updated.limitMinutes! > old.limitMinutes!;
+}

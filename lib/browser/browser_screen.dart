@@ -1,19 +1,39 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 
+import '../adblock/adblock.dart';
 import '../block/blocked_view.dart';
 import '../blrome_controller.dart';
+import '../history/history_screen.dart';
+import '../history/history_store.dart';
+import '../rules/domain_matcher.dart';
+import '../rules/site_rule.dart';
+import '../settings/rule_edit_dialog.dart';
 import '../settings/settings_screen.dart';
+import '../stats/usage_stats_screen.dart';
 import '../usage/usage_tracker.dart';
 import '../util/format.dart';
+import 'browser_settings.dart';
 import 'browser_tab.dart';
 import 'url_utils.dart';
 
+const _desktopUserAgent =
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) '
+    'Chrome/141.0.0.0 Safari/537.36';
+
 class BrowserScreen extends StatefulWidget {
-  const BrowserScreen({super.key, required this.controller});
+  const BrowserScreen({
+    super.key,
+    required this.controller,
+    required this.settings,
+    required this.history,
+  });
 
   final BlromeController controller;
+  final BrowserSettings settings;
+  final HistoryStore history;
 
   @override
   State<BrowserScreen> createState() => _BrowserScreenState();
@@ -27,12 +47,14 @@ class _BrowserScreenState extends State<BrowserScreen>
 
   final _address = TextEditingController();
   final _addressFocus = FocusNode();
+  final _cookies = WebViewCookieManager();
   late final UsageTracker _tracker;
 
-  /// 설정 화면이 열려 있는 동안은 사용 시간을 세지 않는다.
-  bool _settingsOpen = false;
+  /// 설정·기록 같은 다른 화면이 열려 있는 동안은 사용 시간을 세지 않는다.
+  bool _pageOpen = false;
 
   BlromeController get _c => widget.controller;
+  BrowserSettings get _settings => widget.settings;
   BrowserTab get _tab => _tabs[_active];
 
   @override
@@ -43,10 +65,16 @@ class _BrowserScreenState extends State<BrowserScreen>
     _address.text = homeUrl;
     _addressFocus.addListener(_onAddressFocus);
     _c.addListener(_syncBlocking);
+    _settings.addListener(_applySettings);
     _tracker = UsageTracker(
       controller: _c,
-      currentHost: () =>
-          _settingsOpen || _tab.isBlocked ? null : Uri.tryParse(_tab.url)?.host,
+      currentHost: () {
+        if (_pageOpen || _tab.isBlocked) return null;
+        final uri = Uri.tryParse(_tab.url);
+        return uri != null && (uri.scheme == 'http' || uri.scheme == 'https')
+            ? uri.host
+            : null;
+      },
       onWarning: (domain, remaining) =>
           _snack('$domain 남은 시간 ${formatDuration(remaining)}'),
       onLimitReached: (domain) => _snack('$domain 오늘 사용 시간을 다 썼어요'),
@@ -57,6 +85,7 @@ class _BrowserScreenState extends State<BrowserScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _c.removeListener(_syncBlocking);
+    _settings.removeListener(_applySettings);
     _tracker.dispose();
     _address.dispose();
     _addressFocus.dispose();
@@ -67,6 +96,76 @@ class _BrowserScreenState extends State<BrowserScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _tracker.foreground = state == AppLifecycleState.resumed;
     if (!_tracker.foreground) _c.flush();
+  }
+
+  // ---- 탭 생성과 웹뷰 설정 ----
+
+  BrowserTab _createTab(String url) {
+    late final BrowserTab tab;
+    final web = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(NavigationDelegate(
+        onNavigationRequest: (request) {
+          if (!request.isMainFrame) return NavigationDecision.navigate;
+          final host = Uri.tryParse(request.url)?.host ?? '';
+          // 광고 링크로 페이지 전체가 넘어가는 것(팝업 광고 등)을 막는다.
+          if (isAdHost(host) && _settings.adBlockEnabledFor(tab.host)) {
+            return NavigationDecision.prevent;
+          }
+          if (_c.decideUrl(request.url).blocked) {
+            setState(() => _blockTab(tab, request.url));
+            if (tab == _tab) _updateAddress();
+            return NavigationDecision.prevent;
+          }
+          return NavigationDecision.navigate;
+        },
+        onPageStarted: (url) => _onUrlChanged(tab, url),
+        onUrlChange: (change) => _onUrlChanged(tab, change.url),
+        onProgress: (p) {
+          _injectAdBlock(tab);
+          if (mounted) setState(() => tab.progress = p / 100);
+        },
+        onPageFinished: (url) async {
+          _injectAdBlock(tab);
+          tab.title = await tab.webView.getTitle() ?? '';
+          tab.canGoBack = await tab.webView.canGoBack();
+          tab.canGoForward = await tab.webView.canGoForward();
+          if (!tab.isBlocked) widget.history.add(url, tab.title);
+          if (mounted) setState(() {});
+        },
+      ));
+    tab = BrowserTab(_nextId++, url, web);
+    _applySettingsTo(tab);
+    web.loadRequest(Uri.parse(url));
+    return tab;
+  }
+
+  void _applySettingsTo(BrowserTab tab) {
+    final platform = tab.webView.platform;
+    if (platform is AndroidWebViewController) {
+      platform.setTextZoom(_settings.textZoom);
+      // Chrome처럼 페이지의 viewport 설정을 따른다. 데스크톱 사이트 보기에 필요.
+      platform.setUseWideViewPort(true);
+      platform.setMediaPlaybackRequiresUserGesture(true);
+      final cookies = _cookies.platform;
+      if (cookies is AndroidWebViewCookieManager) {
+        cookies.setAcceptThirdPartyCookies(platform, _settings.thirdPartyCookies);
+      }
+    }
+  }
+
+  void _applySettings() {
+    for (final tab in _tabs) {
+      _applySettingsTo(tab);
+    }
+  }
+
+  void _injectAdBlock(BrowserTab tab) {
+    if (tab.isBlocked) return;
+    final uri = Uri.tryParse(tab.url);
+    if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) return;
+    if (!_settings.adBlockEnabledFor(uri.host)) return;
+    tab.webView.runJavaScript(adBlockScript).catchError((_) {});
   }
 
   // ---- 차단 ----
@@ -154,37 +253,6 @@ class _BrowserScreenState extends State<BrowserScreen>
 
   // ---- 탭 ----
 
-  BrowserTab _createTab(String url) {
-    late final BrowserTab tab;
-    final web = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(NavigationDelegate(
-        onNavigationRequest: (request) {
-          if (!request.isMainFrame) return NavigationDecision.navigate;
-          if (_c.decideUrl(request.url).blocked) {
-            setState(() => _blockTab(tab, request.url));
-            if (tab == _tab) _updateAddress();
-            return NavigationDecision.prevent;
-          }
-          return NavigationDecision.navigate;
-        },
-        onPageStarted: (url) => _onUrlChanged(tab, url),
-        onUrlChange: (change) => _onUrlChanged(tab, change.url),
-        onProgress: (p) {
-          if (mounted) setState(() => tab.progress = p / 100);
-        },
-        onPageFinished: (_) async {
-          tab.title = await tab.webView.getTitle() ?? '';
-          tab.canGoBack = await tab.webView.canGoBack();
-          tab.canGoForward = await tab.webView.canGoForward();
-          if (mounted) setState(() {});
-        },
-      ));
-    tab = BrowserTab(_nextId++, url, web);
-    web.loadRequest(Uri.parse(url));
-    return tab;
-  }
-
   void _newTab() {
     setState(() {
       _tabs.add(_createTab(homeUrl));
@@ -219,6 +287,7 @@ class _BrowserScreenState extends State<BrowserScreen>
             children: [
               for (var i = 0; i < _tabs.length; i++)
                 ListTile(
+                  dense: true,
                   selected: i == _active,
                   leading: Icon(_tabs[i].isBlocked ? Icons.block : Icons.public),
                   title: Text(
@@ -241,6 +310,7 @@ class _BrowserScreenState extends State<BrowserScreen>
                   },
                 ),
               ListTile(
+                dense: true,
                 leading: const Icon(Icons.add),
                 title: const Text('새 탭'),
                 onTap: () {
@@ -255,13 +325,260 @@ class _BrowserScreenState extends State<BrowserScreen>
     );
   }
 
-  Future<void> _openSettings() async {
-    _settingsOpen = true;
-    await Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => SettingsScreen(controller: _c),
-    ));
-    _settingsOpen = false;
+  // ---- 다른 화면 ----
+
+  Future<T?> _push<T>(Widget page) async {
+    _pageOpen = true;
+    final result =
+        await Navigator.of(context).push<T>(MaterialPageRoute(builder: (_) => page));
+    _pageOpen = false;
     _syncBlocking();
+    return result;
+  }
+
+  Future<void> _openRules() => _push<void>(SettingsScreen(controller: _c));
+
+  Future<void> _openStats() => _push<void>(UsageStatsScreen(controller: _c));
+
+  Future<void> _openHistory() async {
+    final url = await _push<String>(HistoryScreen(history: widget.history));
+    if (url != null) _go(url);
+  }
+
+  // ---- 메뉴 / 시트 ----
+
+  void _toggleDesktop() {
+    final tab = _tab;
+    setState(() => tab.desktopMode = !tab.desktopMode);
+    tab.webView.setUserAgent(tab.desktopMode ? _desktopUserAgent : null);
+    if (!tab.isBlocked) tab.webView.reload();
+  }
+
+  Future<void> _toggleAdBlock() async {
+    await _settings.setAdBlock(!_settings.adBlock);
+    _snack(_settings.adBlock ? '광고 차단을 켰어요' : '광고 차단을 껐어요');
+    if (!_tab.isBlocked) _tab.webView.reload();
+  }
+
+  Future<void> _showMenu() async {
+    final tab = _tab;
+    void run(VoidCallback action) {
+      Navigator.pop(context);
+      action();
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+          child: GridView.count(
+            crossAxisCount: 4,
+            shrinkWrap: true,
+            childAspectRatio: 1.1,
+            physics: const NeverScrollableScrollPhysics(),
+            children: [
+              _MenuTile(
+                icon: Icons.timer_outlined,
+                label: '차단·시간 설정',
+                onTap: () => run(_openRules),
+              ),
+              _MenuTile(
+                icon: Icons.bar_chart,
+                label: '사용 시간',
+                onTap: () => run(_openStats),
+              ),
+              _MenuTile(
+                icon: Icons.history,
+                label: '방문 기록',
+                onTap: () => run(_openHistory),
+              ),
+              _MenuTile(
+                icon: Icons.add_box_outlined,
+                label: '새 탭',
+                onTap: () => run(_newTab),
+              ),
+              _MenuTile(
+                icon: Icons.desktop_windows_outlined,
+                label: '데스크톱 사이트',
+                selected: tab.desktopMode,
+                onTap: () => run(_toggleDesktop),
+              ),
+              _MenuTile(
+                icon: Icons.shield_outlined,
+                label: '광고 차단',
+                selected: _settings.adBlock,
+                onTap: () => run(_toggleAdBlock),
+              ),
+              _MenuTile(
+                icon: Icons.cookie_outlined,
+                label: '쿠키·데이터',
+                onTap: () => run(_showCookieSheet),
+              ),
+              _MenuTile(
+                icon: Icons.format_size,
+                label: '글자 크기',
+                onTap: () => run(_showTextZoom),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showSiteInfo() async {
+    final tab = _tab;
+    final uri = Uri.tryParse(tab.displayUrl);
+    final host = uri?.host ?? '';
+    if (host.isEmpty) return;
+    final secure = uri!.scheme == 'https';
+    final siteDomain = normalizeDomain(host) ?? host;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListenableBuilder(
+          listenable: Listenable.merge([_c, _settings]),
+          builder: (context, _) {
+            final rule = _c.ruleFor(host);
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: Icon(secure ? Icons.lock_outline : Icons.lock_open,
+                      color: secure ? null : Theme.of(context).colorScheme.error),
+                  title: Text(host),
+                  subtitle: Text(secure ? '보안 연결(https)' : '보안되지 않은 연결'),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.timer_outlined),
+                  title: Text(rule == null ? '이 사이트 시간 제한 추가' : '시간 제한'),
+                  subtitle: rule == null
+                      ? null
+                      : Text(rule.mode == RuleMode.alwaysBlock
+                          ? '${rule.domain} · 항상 차단'
+                          : '${rule.domain} · 하루 ${formatDuration(rule.limitSeconds!)}'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    if (rule != null) return _openRules();
+                    final created =
+                        await showRuleEditDialog(this.context, domain: siteDomain);
+                    if (created != null) await _c.upsertRule(created);
+                  },
+                ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.shield_outlined),
+                  title: const Text('이 사이트 광고 차단'),
+                  subtitle: _settings.adBlock ? null : const Text('광고 차단이 꺼져 있어요'),
+                  value: _settings.adBlockEnabledFor(host),
+                  onChanged: _settings.adBlock
+                      ? (v) async {
+                          await _settings.setAdBlockException(siteDomain, !v);
+                          tab.webView.reload();
+                        }
+                      : null,
+                ),
+                ListTile(
+                  leading: const Icon(Icons.cookie_outlined),
+                  title: const Text('쿠키·사이트 데이터'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _showCookieSheet();
+                  },
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showCookieSheet() async {
+    Future<void> done(BuildContext sheet, Future<void> work, String message) async {
+      await work;
+      if (sheet.mounted) Navigator.pop(sheet);
+      _snack(message);
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListenableBuilder(
+          listenable: _settings,
+          builder: (context, _) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                secondary: const Icon(Icons.cookie_outlined),
+                title: const Text('다른 사이트 쿠키 허용'),
+                subtitle: const Text('끄면 일부 로그인·임베드가 동작하지 않을 수 있어요'),
+                value: _settings.thirdPartyCookies,
+                onChanged: _settings.setThirdPartyCookies,
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: const Text('모든 쿠키 삭제'),
+                subtitle: const Text('모든 사이트에서 로그아웃돼요'),
+                onTap: () => done(context, _cookies.clearCookies(), '쿠키를 삭제했어요'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.cached),
+                title: const Text('캐시 삭제'),
+                onTap: () => done(context, _tab.webView.clearCache(), '캐시를 삭제했어요'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.storage_outlined),
+                title: const Text('사이트 저장소 삭제'),
+                subtitle: const Text('모든 사이트의 로컬 저장 데이터를 지워요'),
+                onTap: () => done(
+                    context, _tab.webView.clearLocalStorage(), '사이트 저장소를 삭제했어요'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showTextZoom() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListenableBuilder(
+          listenable: _settings,
+          builder: (context, _) => Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('웹페이지 글자 크기 ${_settings.textZoom}%',
+                    style: Theme.of(context).textTheme.titleMedium),
+                Slider(
+                  min: 50,
+                  max: 200,
+                  divisions: 15,
+                  value: _settings.textZoom.toDouble(),
+                  label: '${_settings.textZoom}%',
+                  onChanged: (v) => _settings.setTextZoom(v.round()),
+                ),
+                TextButton(
+                  onPressed: () => _settings.setTextZoom(100),
+                  child: const Text('기본값(100%)'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   void _snack(String message) {
@@ -286,22 +603,27 @@ class _BrowserScreenState extends State<BrowserScreen>
           child: Column(
             children: [
               _buildToolbar(context),
-              if (tab.progress < 1 && !tab.isBlocked)
-                LinearProgressIndicator(value: tab.progress, minHeight: 2),
+              SizedBox(
+                height: 2,
+                child: tab.progress < 1 && !tab.isBlocked
+                    ? LinearProgressIndicator(value: tab.progress, minHeight: 2)
+                    : null,
+              ),
               Expanded(
                 child: Stack(
                   children: [
                     IndexedStack(
                       index: _active,
                       children: [
-                        for (final t in _tabs) _buildWebView(t),
+                        for (final t in _tabs)
+                          WebViewWidget(key: ValueKey(t.id), controller: t.webView),
                       ],
                     ),
                     if (tab.isBlocked) _buildBlocked(tab),
                   ],
                 ),
               ),
-              _buildBottomBar(),
+              _buildBottomBar(context),
             ],
           ),
         ),
@@ -310,38 +632,61 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 
   Widget _buildToolbar(BuildContext context) {
+    final tab = _tab;
+    final scheme = Theme.of(context).colorScheme;
+    final uri = Uri.tryParse(tab.displayUrl);
+    final secure = uri?.scheme == 'https';
     return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
       child: Row(
         children: [
+          IconButton(
+            tooltip: '사이트 정보',
+            iconSize: 20,
+            icon: Icon(
+              tab.isBlocked
+                  ? Icons.block
+                  : secure
+                      ? Icons.lock_outline
+                      : Icons.info_outline,
+            ),
+            onPressed: _showSiteInfo,
+          ),
           Expanded(
-            child: TextField(
-              controller: _address,
-              focusNode: _addressFocus,
-              keyboardType: TextInputType.url,
-              textInputAction: TextInputAction.go,
-              autocorrect: false,
-              onSubmitted: _go,
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: 'Google 검색 또는 URL 입력',
-                prefixIcon: const Icon(Icons.search, size: 20),
-                filled: true,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: BorderSide.none,
+            child: SizedBox(
+              height: 38,
+              child: TextField(
+                controller: _address,
+                focusNode: _addressFocus,
+                keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.go,
+                autocorrect: false,
+                style: const TextStyle(fontSize: 14),
+                onSubmitted: _go,
+                decoration: InputDecoration(
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 14),
+                  hintText: 'Google 검색 또는 URL 입력',
+                  filled: true,
+                  fillColor: scheme.surfaceContainerHighest,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(19),
+                    borderSide: BorderSide.none,
+                  ),
                 ),
               ),
             ),
           ),
           _RemainingChip(controller: _c, url: () => _tab.displayUrl),
+          IconButton(
+            tooltip: '새로고침',
+            iconSize: 20,
+            icon: const Icon(Icons.refresh),
+            onPressed: tab.isBlocked ? null : () => tab.webView.reload(),
+          ),
         ],
       ),
     );
-  }
-
-  Widget _buildWebView(BrowserTab tab) {
-    return WebViewWidget(key: ValueKey(tab.id), controller: tab.webView);
   }
 
   Widget _buildBlocked(BrowserTab tab) {
@@ -353,25 +698,31 @@ class _BrowserScreenState extends State<BrowserScreen>
       reason: decision.reason!,
       limitMinutes: rule.limitMinutes,
       onGoHome: _goHome,
-      onOpenSettings: _openSettings,
+      onOpenSettings: _openRules,
     );
   }
 
-  Widget _buildBottomBar() {
+  Widget _buildBottomBar(BuildContext context) {
     final tab = _tab;
-    return BottomAppBar(
-      height: 56,
-      padding: EdgeInsets.zero,
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      height: 46,
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        border: Border(top: BorderSide(color: scheme.outlineVariant, width: 0.5)),
+      ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
           IconButton(
             tooltip: '뒤로',
+            iconSize: 22,
             icon: const Icon(Icons.arrow_back),
             onPressed: tab.canGoBack || tab.isBlocked ? _handleBack : null,
           ),
           IconButton(
             tooltip: '앞으로',
+            iconSize: 22,
             icon: const Icon(Icons.arrow_forward),
             onPressed: tab.canGoForward && !tab.isBlocked
                 ? () => tab.webView.goForward()
@@ -379,35 +730,76 @@ class _BrowserScreenState extends State<BrowserScreen>
           ),
           IconButton(
             tooltip: '홈',
+            iconSize: 22,
             icon: const Icon(Icons.home_outlined),
             onPressed: _goHome,
-          ),
-          IconButton(
-            tooltip: '새로고침',
-            icon: const Icon(Icons.refresh),
-            onPressed: tab.isBlocked ? null : () => tab.webView.reload(),
           ),
           IconButton(
             tooltip: '탭',
             onPressed: _showTabs,
             icon: Container(
-              width: 24,
-              height: 24,
+              width: 20,
+              height: 20,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                border: Border.all(
-                    color: Theme.of(context).colorScheme.onSurface, width: 2),
-                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: scheme.onSurface, width: 1.6),
+                borderRadius: BorderRadius.circular(5),
               ),
               child: Text('${_tabs.length}',
-                  style: const TextStyle(
-                      fontSize: 12, fontWeight: FontWeight.bold)),
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
             ),
           ),
           IconButton(
-            tooltip: '차단 설정',
-            icon: const Icon(Icons.timer_outlined),
-            onPressed: _openSettings,
+            tooltip: '메뉴',
+            iconSize: 22,
+            icon: const Icon(Icons.menu),
+            onPressed: _showMenu,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MenuTile extends StatelessWidget {
+  const _MenuTile({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.selected = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: selected ? scheme.primaryContainer : scheme.surfaceContainerHighest,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon,
+                size: 22, color: selected ? scheme.onPrimaryContainer : null),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            label,
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall,
           ),
         ],
       ),
@@ -431,15 +823,28 @@ class _RemainingChip extends StatelessWidget {
         if (remaining == null) return const SizedBox.shrink();
         final scheme = Theme.of(context).colorScheme;
         final low = remaining <= 300;
-        return Padding(
-          padding: const EdgeInsets.only(left: 8),
-          child: Chip(
-            visualDensity: VisualDensity.compact,
-            avatar: Icon(Icons.hourglass_bottom,
-                size: 16, color: low ? scheme.onError : null),
-            label: Text(formatDuration(remaining)),
-            backgroundColor: low ? scheme.error : null,
-            labelStyle: low ? TextStyle(color: scheme.onError) : null,
+        return Container(
+          margin: const EdgeInsets.only(left: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: low ? scheme.error : scheme.secondaryContainer,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.hourglass_bottom,
+                  size: 14,
+                  color: low ? scheme.onError : scheme.onSecondaryContainer),
+              const SizedBox(width: 2),
+              Text(
+                formatDuration(remaining),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: low ? scheme.onError : scheme.onSecondaryContainer,
+                ),
+              ),
+            ],
           ),
         );
       },

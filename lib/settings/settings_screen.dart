@@ -1,10 +1,9 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../blrome_controller.dart';
 import '../rules/site_rule.dart';
 import '../util/format.dart';
+import '../widgets/hold_confirm.dart';
 import 'rule_edit_dialog.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -19,13 +18,22 @@ class SettingsScreen extends StatelessWidget {
 
   Future<void> _edit(BuildContext context, SiteRule rule) async {
     final updated = await showRuleEditDialog(context, initial: rule);
-    if (updated != null) {
-      await controller.upsertRule(updated, replacing: rule.domain);
+    if (updated == null || !context.mounted) return;
+    // 더 엄하게 바꾸는 건 바로, 느슨하게 바꾸는 건 꾹 눌러야 적용.
+    if (loosens(rule, updated)) {
+      final ok = await showHoldConfirm(
+        context,
+        title: '${rule.domain} 규칙 완화',
+        message: '${_describe(rule)} → ${_describe(updated)}\n정말 바꿀까요?',
+        action: '변경',
+      );
+      if (!ok) return;
     }
+    await controller.upsertRule(updated, replacing: rule.domain);
   }
 
   Future<void> _remove(BuildContext context, SiteRule rule) async {
-    final ok = await _confirmWithDelay(
+    final ok = await showHoldConfirm(
       context,
       title: '${rule.domain} 규칙 삭제',
       message: '정말 이 사이트의 제한을 없앨까요?',
@@ -35,7 +43,7 @@ class SettingsScreen extends StatelessWidget {
   }
 
   Future<void> _unlock(BuildContext context, SiteRule rule) async {
-    final ok = await _confirmWithDelay(
+    final ok = await showHoldConfirm(
       context,
       title: '${rule.domain} 오늘만 해제',
       message: '오늘 자정(00:00)까지 이 사이트를 제한 없이 쓸 수 있어요.\n정말 해제할까요?',
@@ -43,6 +51,10 @@ class SettingsScreen extends StatelessWidget {
     );
     if (ok) await controller.unlockToday(rule.domain);
   }
+
+  static String _describe(SiteRule r) => r.mode == RuleMode.alwaysBlock
+      ? '${r.domain} 항상 차단'
+      : '${r.domain} 하루 ${formatDuration(r.limitSeconds!)}';
 
   @override
   Widget build(BuildContext context) {
@@ -149,81 +161,6 @@ class _RuleTile extends StatelessWidget {
           const PopupMenuItem(value: 'remove', child: Text('삭제')),
         ],
       ),
-    );
-  }
-}
-
-/// 충동적으로 해제하지 않도록 [seconds]초를 기다려야 확인 버튼이 눌리는 대화상자.
-Future<bool> _confirmWithDelay(
-  BuildContext context, {
-  required String title,
-  required String message,
-  required String action,
-  int seconds = 10,
-}) async {
-  final result = await showDialog<bool>(
-    context: context,
-    builder: (_) => _DelayedConfirmDialog(
-      title: title,
-      message: message,
-      action: action,
-      seconds: seconds,
-    ),
-  );
-  return result ?? false;
-}
-
-class _DelayedConfirmDialog extends StatefulWidget {
-  const _DelayedConfirmDialog({
-    required this.title,
-    required this.message,
-    required this.action,
-    required this.seconds,
-  });
-
-  final String title;
-  final String message;
-  final String action;
-  final int seconds;
-
-  @override
-  State<_DelayedConfirmDialog> createState() => _DelayedConfirmDialogState();
-}
-
-class _DelayedConfirmDialogState extends State<_DelayedConfirmDialog> {
-  late int _left = widget.seconds;
-  Timer? _timer;
-
-  @override
-  void initState() {
-    super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 1), (t) {
-      setState(() => _left--);
-      if (_left <= 0) t.cancel();
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text(widget.title),
-      content: Text(widget.message),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('취소'),
-        ),
-        FilledButton(
-          onPressed: _left > 0 ? null : () => Navigator.pop(context, true),
-          child: Text(_left > 0 ? '${widget.action} ($_left)' : widget.action),
-        ),
-      ],
     );
   }
 }
