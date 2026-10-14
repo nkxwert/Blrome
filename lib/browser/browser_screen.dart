@@ -16,6 +16,7 @@ import '../settings/settings_screen.dart';
 import '../stats/usage_stats_screen.dart';
 import '../usage/usage_tracker.dart';
 import '../util/format.dart';
+import 'address_bar.dart';
 import 'browser_settings.dart';
 import 'browser_tab.dart';
 import 'url_utils.dart';
@@ -642,59 +643,26 @@ class _BrowserScreenState extends State<BrowserScreen>
 
   Widget _buildToolbar(BuildContext context) {
     final tab = _tab;
-    final scheme = Theme.of(context).colorScheme;
-    final uri = Uri.tryParse(tab.displayUrl);
-    final secure = uri?.scheme == 'https';
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
-      child: Row(
-        children: [
-          IconButton(
-            tooltip: '사이트 정보',
-            iconSize: 20,
-            icon: Icon(
-              tab.isBlocked
-                  ? Icons.block
-                  : secure
-                      ? Icons.lock_outline
-                      : Icons.info_outline,
-            ),
-            onPressed: _showSiteInfo,
-          ),
-          Expanded(
-            child: SizedBox(
-              height: 38,
-              child: TextField(
-                controller: _address,
-                focusNode: _addressFocus,
-                keyboardType: TextInputType.url,
-                textInputAction: TextInputAction.go,
-                autocorrect: false,
-                style: const TextStyle(fontSize: 14),
-                onSubmitted: _go,
-                decoration: InputDecoration(
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 14),
-                  hintText: 'Google 검색 또는 URL 입력',
-                  filled: true,
-                  fillColor: scheme.surfaceContainerHighest,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(19),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          _RemainingChip(controller: _c, url: () => _tab.displayUrl),
-          IconButton(
-            tooltip: '새로고침',
-            iconSize: 20,
-            icon: const Icon(Icons.refresh),
-            onPressed: tab.isBlocked ? null : () => tab.webView.reload(),
-          ),
-        ],
-      ),
+    final secure = Uri.tryParse(tab.displayUrl)?.scheme == 'https';
+    return AddressBar(
+      controller: _address,
+      focusNode: _addressFocus,
+      onSubmitted: _go,
+      leadingIcon: tab.isBlocked
+          ? Icons.block
+          : secure
+              ? Icons.lock_outline
+              : Icons.info_outline,
+      onLeadingPressed: _showSiteInfo,
+      trailing: [
+        _RemainingChip(controller: _c, url: () => _tab.displayUrl),
+        IconButton(
+          tooltip: '새로고침',
+          iconSize: 22,
+          icon: const Icon(Icons.refresh),
+          onPressed: tab.isBlocked ? null : () => tab.webView.reload(),
+        ),
+      ],
     );
   }
 
