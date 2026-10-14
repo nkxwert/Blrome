@@ -1,8 +1,22 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
+
+// 릴리스 서명 키. CI는 환경 변수로, 로컬은 android/key.properties로 넘긴다.
+// 둘 다 없으면 디버그 키로 서명한다 (기존 앱 위에 업데이트 설치는 안 됨).
+val keyProperties = Properties().apply {
+    val file = rootProject.file("key.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+fun signingValue(env: String, prop: String): String? =
+    System.getenv(env)?.takeIf { it.isNotEmpty() } ?: keyProperties.getProperty(prop)
+
+val releaseStoreFile = signingValue("BLROME_KEYSTORE_PATH", "storeFile")
+val hasReleaseKey = releaseStoreFile != null && file(releaseStoreFile).exists()
 
 android {
     namespace = "com.blrome.blrome"
@@ -29,11 +43,20 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = signingValue("BLROME_KEYSTORE_PASSWORD", "storePassword")
+                keyAlias = signingValue("BLROME_KEY_ALIAS", "keyAlias")
+                keyPassword = signingValue("BLROME_KEY_PASSWORD", "keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
         }
     }
 }
@@ -46,4 +69,9 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // WebView의 WebViewClient를 꺼내 광고 요청을 가로채는 데 쓴다 (MainActivity).
+    implementation("androidx.webkit:webkit:1.15.0")
 }

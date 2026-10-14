@@ -36,11 +36,33 @@ jobs:
       - name: Test
         run: flutter test
 
+      # 저장소 Settings → Secrets and variables → Actions에 아래 4개를 넣으면
+      # 매번 같은 키로 서명돼 기존 앱 위에 업데이트 설치가 된다.
+      - name: Set up release signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.BLROME_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.BLROME_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.BLROME_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.BLROME_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::BLROME_KEYSTORE_BASE64 secret이 없어 디버그 키로 서명합니다."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          {
+            echo "BLROME_KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
+            echo "BLROME_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "BLROME_KEY_ALIAS=$KEY_ALIAS"
+            echo "BLROME_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      # 빌드 번호를 실행 번호로 올려서 새 APK가 항상 이전 것보다 최신이 되게 한다.
       - name: Build APK
-        run: flutter build apk --release --split-per-abi
+        run: flutter build apk --release --split-per-abi --build-number ${{ github.run_number }}
 
       - name: Build universal APK
-        run: flutter build apk --release
+        run: flutter build apk --release --build-number ${{ github.run_number }}
 
       - uses: actions/upload-artifact@v4
         with:

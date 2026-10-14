@@ -4,6 +4,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../adblock/adblock.dart';
+import '../adblock/native_adblock.dart';
 import '../block/blocked_view.dart';
 import '../blrome_controller.dart';
 import '../history/history_screen.dart';
@@ -66,6 +67,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     _addressFocus.addListener(_onAddressFocus);
     _c.addListener(_syncBlocking);
     _settings.addListener(_applySettings);
+    NativeAdBlock.configure(_settings);
     _tracker = UsageTracker(
       controller: _c,
       currentHost: () {
@@ -101,43 +103,49 @@ class _BrowserScreenState extends State<BrowserScreen>
   // ---- 탭 생성과 웹뷰 설정 ----
 
   BrowserTab _createTab(String url) {
-    late final BrowserTab tab;
-    final web = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(NavigationDelegate(
-        onNavigationRequest: (request) {
-          if (!request.isMainFrame) return NavigationDecision.navigate;
-          final host = Uri.tryParse(request.url)?.host ?? '';
-          // 광고 링크로 페이지 전체가 넘어가는 것(팝업 광고 등)을 막는다.
-          if (isAdHost(host) && _settings.adBlockEnabledFor(tab.host)) {
-            return NavigationDecision.prevent;
-          }
-          if (_c.decideUrl(request.url).blocked) {
-            setState(() => _blockTab(tab, request.url));
-            if (tab == _tab) _updateAddress();
-            return NavigationDecision.prevent;
-          }
-          return NavigationDecision.navigate;
-        },
-        onPageStarted: (url) => _onUrlChanged(tab, url),
-        onUrlChange: (change) => _onUrlChanged(tab, change.url),
-        onProgress: (p) {
-          _injectAdBlock(tab);
-          if (mounted) setState(() => tab.progress = p / 100);
-        },
-        onPageFinished: (url) async {
-          _injectAdBlock(tab);
-          tab.title = await tab.webView.getTitle() ?? '';
-          tab.canGoBack = await tab.webView.canGoBack();
-          tab.canGoForward = await tab.webView.canGoForward();
-          if (!tab.isBlocked) widget.history.add(url, tab.title);
-          if (mounted) setState(() {});
-        },
-      ));
-    tab = BrowserTab(_nextId++, url, web);
-    _applySettingsTo(tab);
-    web.loadRequest(Uri.parse(url));
+    final tab = BrowserTab(_nextId++, url, WebViewController());
+    _initTab(tab, url);
     return tab;
+  }
+
+  /// 웹뷰를 설정하고 [url]을 연다. 광고 차단 래퍼는 델리게이트를 설정한 뒤에 걸어야
+  /// 하므로 순서대로 기다린다.
+  Future<void> _initTab(BrowserTab tab, String url) async {
+    final web = tab.webView;
+    await web.setJavaScriptMode(JavaScriptMode.unrestricted);
+    await web.setNavigationDelegate(NavigationDelegate(
+      onNavigationRequest: (request) {
+        if (!request.isMainFrame) return NavigationDecision.navigate;
+        final host = Uri.tryParse(request.url)?.host ?? '';
+        // 광고 링크로 페이지 전체가 넘어가는 것(팝업 광고 등)을 막는다.
+        if (isAdHost(host) && _settings.adBlockEnabledFor(tab.host)) {
+          return NavigationDecision.prevent;
+        }
+        if (_c.decideUrl(request.url).blocked) {
+          setState(() => _blockTab(tab, request.url));
+          if (tab == _tab) _updateAddress();
+          return NavigationDecision.prevent;
+        }
+        return NavigationDecision.navigate;
+      },
+      onPageStarted: (url) => _onUrlChanged(tab, url),
+      onUrlChange: (change) => _onUrlChanged(tab, change.url),
+      onProgress: (p) {
+        _injectAdBlock(tab);
+        if (mounted) setState(() => tab.progress = p / 100);
+      },
+      onPageFinished: (url) async {
+        _injectAdBlock(tab);
+        tab.title = await web.getTitle() ?? '';
+        tab.canGoBack = await web.canGoBack();
+        tab.canGoForward = await web.canGoForward();
+        if (!tab.isBlocked) widget.history.add(url, tab.title);
+        if (mounted) setState(() {});
+      },
+    ));
+    await NativeAdBlock.attach(web);
+    _applySettingsTo(tab);
+    if (tab.url == url && !tab.isBlocked) await web.loadRequest(Uri.parse(url));
   }
 
   void _applySettingsTo(BrowserTab tab) {
@@ -155,6 +163,7 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 
   void _applySettings() {
+    NativeAdBlock.configure(_settings);
     for (final tab in _tabs) {
       _applySettingsTo(tab);
     }
