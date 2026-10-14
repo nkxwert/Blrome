@@ -26,7 +26,7 @@ lib/
 ├─ main.dart                  # 앱 시작, 저장소 열기
 ├─ blrome_controller.dart     # 규칙 · 날짜별 사용량 · 오늘 해제 관리
 ├─ browser/
-│  ├─ browser_screen.dart     # 주소창 + 탭 + WebView, 차단 처리
+│  ├─ browser_screen.dart     # 주소창 + 탭 + WebView(webview_flutter), 차단 처리
 │  ├─ browser_tab.dart        # 탭 상태
 │  └─ url_utils.dart          # 입력 → URL 또는 Google 검색
 ├─ rules/

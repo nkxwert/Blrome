@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 import '../block/blocked_view.dart';
 import '../blrome_controller.dart';
@@ -39,7 +39,7 @@ class _BrowserScreenState extends State<BrowserScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _tabs.add(BrowserTab(_nextId++, homeUrl));
+    _tabs.add(_createTab(homeUrl));
     _address.text = homeUrl;
     _addressFocus.addListener(_onAddressFocus);
     _c.addListener(_syncBlocking);
@@ -79,7 +79,7 @@ class _BrowserScreenState extends State<BrowserScreen>
         if (!_c.decideUrl(tab.blockedUrl!).blocked) {
           final url = tab.blockedUrl!;
           tab.blockedUrl = null;
-          tab.webView?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+          tab.webView.loadRequest(Uri.parse(url));
           changed = true;
         }
       } else if (_c.decideUrl(tab.url).blocked) {
@@ -96,14 +96,14 @@ class _BrowserScreenState extends State<BrowserScreen>
   /// [tab]에 차단 화면을 띄우고 페이지는 비워서 영상/소리를 멈춘다.
   void _blockTab(BrowserTab tab, String url) {
     tab.blockedUrl = url;
-    tab.webView?.loadUrl(urlRequest: URLRequest(url: WebUri('about:blank')));
+    tab.webView.loadHtmlString('<html></html>');
   }
 
   /// WebView의 URL이 바뀔 때마다 호출. 차단 대상이면 막는다.
-  void _onUrlChanged(BrowserTab tab, WebUri? uri) {
-    if (uri == null) return;
-    final url = uri.toString();
-    if (tab.isBlocked && url == 'about:blank') return;
+  void _onUrlChanged(BrowserTab tab, String? url) {
+    if (url == null) return;
+    // 차단 중에 비운 페이지(about:blank 등)로 바뀌는 건 무시한다.
+    if (tab.isBlocked && (Uri.tryParse(url)?.host ?? '').isEmpty) return;
     tab.url = url;
     if (_c.decideUrl(url).blocked) _blockTab(tab, url);
     if (!mounted) return;
@@ -121,7 +121,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       setState(() => _blockTab(tab, url));
     } else {
       setState(() => tab.blockedUrl = null);
-      tab.webView?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+      tab.webView.loadRequest(Uri.parse(url));
     }
     _updateAddress();
   }
@@ -145,7 +145,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     final web = _tab.webView;
     if (_tab.isBlocked) {
       _goHome();
-    } else if (web != null && await web.canGoBack()) {
+    } else if (await web.canGoBack()) {
       await web.goBack();
     } else {
       await SystemNavigator.pop();
@@ -154,9 +154,40 @@ class _BrowserScreenState extends State<BrowserScreen>
 
   // ---- 탭 ----
 
+  BrowserTab _createTab(String url) {
+    late final BrowserTab tab;
+    final web = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(NavigationDelegate(
+        onNavigationRequest: (request) {
+          if (!request.isMainFrame) return NavigationDecision.navigate;
+          if (_c.decideUrl(request.url).blocked) {
+            setState(() => _blockTab(tab, request.url));
+            if (tab == _tab) _updateAddress();
+            return NavigationDecision.prevent;
+          }
+          return NavigationDecision.navigate;
+        },
+        onPageStarted: (url) => _onUrlChanged(tab, url),
+        onUrlChange: (change) => _onUrlChanged(tab, change.url),
+        onProgress: (p) {
+          if (mounted) setState(() => tab.progress = p / 100);
+        },
+        onPageFinished: (_) async {
+          tab.title = await tab.webView.getTitle() ?? '';
+          tab.canGoBack = await tab.webView.canGoBack();
+          tab.canGoForward = await tab.webView.canGoForward();
+          if (mounted) setState(() {});
+        },
+      ));
+    tab = BrowserTab(_nextId++, url, web);
+    web.loadRequest(Uri.parse(url));
+    return tab;
+  }
+
   void _newTab() {
     setState(() {
-      _tabs.add(BrowserTab(_nextId++, homeUrl));
+      _tabs.add(_createTab(homeUrl));
       _active = _tabs.length - 1;
     });
     _updateAddress();
@@ -165,7 +196,7 @@ class _BrowserScreenState extends State<BrowserScreen>
   void _closeTab(int index) {
     setState(() {
       _tabs.removeAt(index);
-      if (_tabs.isEmpty) _tabs.add(BrowserTab(_nextId++, homeUrl));
+      if (_tabs.isEmpty) _tabs.add(_createTab(homeUrl));
       if (_active >= _tabs.length) _active = _tabs.length - 1;
       if (index < _active) _active--;
     });
@@ -310,37 +341,7 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 
   Widget _buildWebView(BrowserTab tab) {
-    return InAppWebView(
-      key: ValueKey(tab.id),
-      initialUrlRequest: URLRequest(url: WebUri(tab.url)),
-      initialSettings: InAppWebViewSettings(
-        useShouldOverrideUrlLoading: true,
-        mediaPlaybackRequiresUserGesture: true,
-      ),
-      onWebViewCreated: (c) => tab.webView = c,
-      shouldOverrideUrlLoading: (c, action) async {
-        final uri = action.request.url;
-        if (!action.isForMainFrame || uri == null) {
-          return NavigationActionPolicy.ALLOW;
-        }
-        final url = uri.toString();
-        if (_c.decideUrl(url).blocked) {
-          setState(() => _blockTab(tab, url));
-          if (tab == _tab) _updateAddress();
-          return NavigationActionPolicy.CANCEL;
-        }
-        return NavigationActionPolicy.ALLOW;
-      },
-      onLoadStart: (c, uri) => _onUrlChanged(tab, uri),
-      onUpdateVisitedHistory: (c, uri, _) => _onUrlChanged(tab, uri),
-      onTitleChanged: (c, title) => setState(() => tab.title = title ?? ''),
-      onProgressChanged: (c, p) => setState(() => tab.progress = p / 100),
-      onLoadStop: (c, uri) async {
-        tab.canGoBack = await c.canGoBack();
-        tab.canGoForward = await c.canGoForward();
-        if (mounted) setState(() {});
-      },
-    );
+    return WebViewWidget(key: ValueKey(tab.id), controller: tab.webView);
   }
 
   Widget _buildBlocked(BrowserTab tab) {
@@ -373,7 +374,7 @@ class _BrowserScreenState extends State<BrowserScreen>
             tooltip: '앞으로',
             icon: const Icon(Icons.arrow_forward),
             onPressed: tab.canGoForward && !tab.isBlocked
-                ? () => tab.webView?.goForward()
+                ? () => tab.webView.goForward()
                 : null,
           ),
           IconButton(
@@ -384,7 +385,7 @@ class _BrowserScreenState extends State<BrowserScreen>
           IconButton(
             tooltip: '새로고침',
             icon: const Icon(Icons.refresh),
-            onPressed: tab.isBlocked ? null : () => tab.webView?.reload(),
+            onPressed: tab.isBlocked ? null : () => tab.webView.reload(),
           ),
           IconButton(
             tooltip: '탭',

@@ -1,7 +1,7 @@
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 class BrowserTab {
-  BrowserTab(this.id, this.url);
+  BrowserTab(this.id, this.url, this.webView);
 
   final int id;
 
@@ -11,7 +11,7 @@ class BrowserTab {
   double progress = 1;
   bool canGoBack = false;
   bool canGoForward = false;
-  InAppWebViewController? webView;
+  final WebViewController webView;
 
   /// 차단 화면을 보여 주는 중이면 차단된 원래 URL.
   String? blockedUrl;
